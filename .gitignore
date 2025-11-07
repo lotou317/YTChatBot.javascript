@@ -1,0 +1,6 @@
+YoutubeAuth/client_secret.json
+node_modules/
+.env
+AudioTranscriber/.env
+AudioTranscriber/env
+YoutubeAuth/token.json
