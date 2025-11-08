@@ -4,3 +4,7 @@ node_modules/
 AudioTranscriber/.env
 AudioTranscriber/env
 YoutubeAuth/token.json
+whisper.cpp/
+whisper
+
+ggml-medium.en.bin
