@@ -1,47 +1,65 @@
-import fs from 'fs';
-import mic from 'mic';
-import OpenAI from 'openai';
-import 'dotenv/config'; // loads variables from .env
-import { env } from 'process';
+import fs from "fs";
+import { spawn } from "child_process";
+import path from "path";
 
+// Set up paths for the Whisper executable and model
+const whisperPath = path.resolve("../whisper.cpp/build/bin/Release/whisper-cli.exe"); // adjust if needed
+const modelPath = path.resolve("./models/ggml-medium.en.bin");
 
-// const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+// Clip output path
+const filePath = path.resolve("./clip_1.wav");
 
-const micInstance = mic({
-  rate: '16000',
-  channels: '1',
-  device: 'default',
-});
-const micInputStream = micInstance.getAudioStream();
-
-let clipCount = 0;
-let writeStream;
-
-micInputStream.on('data', data => {
-  if (!writeStream) return;
-  writeStream.write(data);
-});
-
+// Step 1: Record audio using ffmpeg
 async function recordClip() {
-  clipCount++;
-  const filePath = `clip_${clipCount}.wav`;
-  writeStream = fs.createWriteStream(filePath);
-
   console.log(`🎙️ Recording ${filePath}...`);
-  micInstance.start();
 
-  await new Promise(res => setTimeout(res, 5000)); // 5 sec
+  // Delete existing file if it already exists
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 
-  micInstance.stop();
-  writeStream.end();
-  console.log(`✅ Saved ${filePath}`);
+  const ffmpeg = spawn("ffmpeg", [
+    "-f", "dshow",
+    "-i", "audio=Microphone (Samson C01U Pro Mic)",
+    "-t", "5",
+    "-ac", "1",
+    "-ar", "16000",
+    filePath
+  ]);
 
-  const transcription = await openai.audio.transcriptions.create({
-    file: fs.createReadStream(filePath),
-    model: 'whisper-1',
+  return new Promise((resolve, reject) => {
+    ffmpeg.stderr.on("data", data => process.stderr.write(data.toString()));
+    ffmpeg.on("exit", code => {
+      if (code === 0) {
+        console.log(`✅ Saved ${filePath}`);
+        resolve();
+      } else {
+        reject(new Error("FFmpeg failed"));
+      }
+    });
   });
-
-  console.log('🗣️ Transcribed text:', transcription.text);
 }
 
-recordClip();
+// Step 2: Run Whisper locally to transcribe
+async function transcribe() {
+  console.log("🧠 Transcribing locally with Whisper...");
+
+  const whisper = spawn(whisperPath, ["-m", modelPath, "-f", filePath]);
+
+  let output = "";
+  whisper.stdout.on("data", data => {
+    const text = data.toString();
+    process.stdout.write(text);
+    output += text;
+  });
+
+  whisper.stderr.on("data", data => process.stderr.write(`⚠️ ${data}`));
+
+  whisper.on("close", () => {
+    console.log("\n📜 Raw output:\n", output);
+    const match = output.match(/text: "(.*)"/);
+    console.log(match ? `🗣️ Transcribed text: ${match[1]}` : "❓ Could not extract text.");
+  });
+}
+
+// Step 3: Run both
+await recordClip();
+await transcribe();
