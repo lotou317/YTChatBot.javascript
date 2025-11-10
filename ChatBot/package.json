@@ -1,0 +1,13 @@
+{
+  "name": "ytchatbot",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "program.js",
+  "scripts": {
+    "start": "node chatbot.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "googleapis": "^165.0.0"
+  }
+}
