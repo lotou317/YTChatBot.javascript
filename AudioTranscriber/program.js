@@ -1,25 +1,27 @@
 import fs from "fs";
 import { spawn } from "child_process";
 import path from "path";
+import { fileURLToPath } from "url";
 
-// Set up paths for the Whisper executable and model
-const whisperPath = path.resolve("../whisper.cpp/build/bin/Release/whisper-cli.exe"); // adjust if needed
-const modelPath = path.resolve("./models/ggml-medium.en.bin");
+// Get proper __dirname for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// Clip output path
-const filePath = path.resolve("./clip_1.wav");
+// 🧭 Paths (now fully correct relative to AudioTranscriber/)
+const whisperPath = path.resolve(__dirname, "../whisper.cpp/build/bin/Release/whisper-cli.exe");
+const modelPath = path.resolve(__dirname, "./models/ggml-medium.en.bin");
+const filePath = path.resolve(__dirname, "../ChatBot/clip_1.wav"); // chatbot.js saves clips here
 
-// Step 1: Record audio using ffmpeg
+// Step 1: Record audio
 async function recordClip() {
   console.log(`🎙️ Recording ${filePath}...`);
 
-  // Delete existing file if it already exists
   if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 
   const ffmpeg = spawn("ffmpeg", [
     "-f", "dshow",
     "-i", "audio=Microphone (Samson C01U Pro Mic)",
-    "-t", "5",
+    "-t", "15",
     "-ac", "1",
     "-ar", "16000",
     filePath
@@ -38,7 +40,7 @@ async function recordClip() {
   });
 }
 
-// Step 2: Run Whisper locally to transcribe
+// Step 2: Run Whisper to transcribe
 async function transcribe() {
   console.log("🧠 Transcribing locally with Whisper...");
 
@@ -53,13 +55,27 @@ async function transcribe() {
 
   whisper.stderr.on("data", data => process.stderr.write(`⚠️ ${data}`));
 
-  whisper.on("close", () => {
-    console.log("\n📜 Raw output:\n", output);
-    const match = output.match(/text: "(.*)"/);
-    console.log(match ? `🗣️ Transcribed text: ${match[1]}` : "❓ Could not extract text.");
+  return new Promise(resolve => {
+    whisper.on("close", () => {
+      console.log("\n📜 Raw output:\n", output);
+
+      const transcriptLines = output
+        .split("\n")
+        .filter(line => line.match(/\[\d{2}:\d{2}:\d{2}\.\d{3}/))
+        .map(line => line.replace(/\[.*?\]\s*/g, "").trim())
+        .filter(line => line.length > 0);
+
+      const transcript = transcriptLines.join(" ").trim();
+
+      if (transcript) {
+        console.log(`🗣️ Transcribed text: "${transcript}"`);
+      } else {
+        console.log("❓ Could not extract text.");
+      }
+
+      resolve(transcript);
+    });
   });
 }
 
-// Step 3: Run both
-await recordClip();
-await transcribe();
+export { recordClip, transcribe };
