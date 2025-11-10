@@ -1,19 +1,24 @@
 import fs from "fs";
+import path from "path";
 import readline from "readline";
 import { google } from "googleapis";
+import { fileURLToPath } from "url";
+
+// -------------------- Helpers for ES modules --------------------
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Scopes define the level of access your bot has.
-// "youtube.force-ssl" lets it read/send live chat messages.
 const SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"];
-const TOKEN_PATH = "token.json";
+const TOKEN_PATH = path.join(__dirname, "token.json");  // now absolute
+const CREDENTIALS_PATH = path.join(__dirname, "client_secret.json"); // now absolute
 
-// Load your client secrets from the JSON file you downloaded
-const credentials = JSON.parse(fs.readFileSync("client_secret.json", "utf8"));
-
+// Load client secrets
+const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, "utf8"));
 const { client_secret, client_id, redirect_uris } = credentials.installed;
 const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
 
-// Check if we already have a saved token
+// -------------------- Token Setup --------------------
 if (fs.existsSync(TOKEN_PATH)) {
   const token = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
   oAuth2Client.setCredentials(token);
@@ -50,7 +55,7 @@ function getNewToken(oAuth2Client) {
   });
 }
 
-// Quick test to verify YouTube API access
+// -------------------- Test YouTube API --------------------
 async function testYouTubeAPI(auth) {
   const service = google.youtube("v3");
   try {
@@ -63,5 +68,19 @@ async function testYouTubeAPI(auth) {
     console.log(`🎉 Authenticated as: ${channel.snippet.title}`);
   } catch (err) {
     console.error("❌ YouTube API test failed:", err);
+  }
+}
+
+// -------------------- Exported function --------------------
+export async function getAuthorizedClient() {
+  const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+  
+  if (fs.existsSync(TOKEN_PATH)) {
+    const token = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
+    oAuth2Client.setCredentials(token);
+    console.log("✅ Authorized YouTube client ready!");
+    return oAuth2Client;
+  } else {
+    throw new Error("⚠️ No token.json found! Run auth.js manually to generate one first.");
   }
 }
