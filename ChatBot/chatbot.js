@@ -1,33 +1,35 @@
-import fs from "fs";
 import { spawn } from "child_process";
-import { recordClip, transcribe } from "../AudioTranscriber/program.js";
+import { startContinuousRecording } from "../AudioTranscriber/program.js";
 import { getAuthorizedClient } from "../YoutubeAuth/auth.js";
 import { google } from "googleapis";
 import "dotenv/config";
+import fs from "fs";
 
+const STREAMER_ACTIVITY = process.env.STREAMER_ACTIVITY;
 const STREAMER_CHANNEL_ID = process.env.STREAMER_CHANNEL_ID;
-const STREAM_VIDEO_ID = process.env.STREAM_VIDEO_ID; // optional, put in .env if you know it
-const LOOP_INTERVAL = 120000; // 2 minutes in ms
+const STREAM_VIDEO_ID = process.env.STREAM_VIDEO_ID;
+const RESPONSE_INTERVAL = 120000; // 2 minutes between chat replies
+let conversationMemory = []; // holds recent lines of text
+const MAX_MEMORY_LENGTH = 10; // only keep the last 10 clips (you can adjust)
+const longTermMemoryFile = "./ChatBot/stream_memory.txt";
+
 
 // -------------------- YouTube Chat Helpers --------------------
 
 async function getLiveChatId(auth, channelId, videoId) {
   const youtube = google.youtube({ version: "v3", auth });
 
-  let liveChatId;
-  let videoTitle;
-
   if (videoId) {
     const videoRes = await youtube.videos.list({
       part: "liveStreamingDetails,snippet",
       id: videoId,
     });
-
     const video = videoRes.data.items?.[0];
     if (!video) throw new Error("❌ Could not find video with the given ID!");
-
-    liveChatId = video.liveStreamingDetails?.activeLiveChatId;
-    videoTitle = video.snippet.title;
+    const liveChatId = video.liveStreamingDetails?.activeLiveChatId;
+    if (!liveChatId) throw new Error("❌ Stream found, but no active chat!");
+    console.log(`✅ Connected to stream: ${video.snippet.title}`);
+    return liveChatId;
   } else {
     const searchRes = await youtube.search.list({
       part: "snippet",
@@ -36,18 +38,14 @@ async function getLiveChatId(auth, channelId, videoId) {
       type: "video",
       maxResults: 1,
     });
-
     const liveVideo = searchRes.data.items?.[0];
-    if (!liveVideo) return null; // no live stream
+    if (!liveVideo) throw new Error("❌ No active live stream found!");
     const videoRes = await youtube.videos.list({
-      part: "liveStreamingDetails,snippet",
+      part: "liveStreamingDetails",
       id: liveVideo.id.videoId,
     });
-    liveChatId = videoRes.data.items?.[0]?.liveStreamingDetails?.activeLiveChatId;
-    videoTitle = videoRes.data.items?.[0]?.snippet.title;
+    return videoRes.data.items?.[0]?.liveStreamingDetails?.activeLiveChatId;
   }
-
-  return liveChatId ? { liveChatId, videoTitle } : null;
 }
 
 async function sendMessage(auth, liveChatId, message) {
@@ -65,17 +63,47 @@ async function sendMessage(auth, liveChatId, message) {
   console.log(`✅ Sent message: "${message}"`);
 }
 
+// -------------------- Short Term Memory Helper --------------------
+
+function updateMemory(transcript) {
+  if (!transcript) return;
+
+  conversationMemory.push(transcript);
+  if (conversationMemory.length > MAX_MEMORY_LENGTH) {
+    conversationMemory.shift(); // remove oldest
+  }
+}
+
+// -------------------- Long Term Memory Helper --------------------
+
+function saveLongTermMemory(transcript) {
+  if (!transcript) return;
+  fs.appendFileSync(longTermMemoryFile, transcript + "\n");
+}
+
+
 // -------------------- AI Response Helper --------------------
 
 async function generateAIResponse(transcribedText) {
+    const recentMemory = conversationMemory.join("\n");
+
   const contextPrompt = `
-You are a viewer in a live YouTube chat.
-The streamer is currently talking and you want to send a message in response.
-Keep your reply short (1–3 sentences), casual, and sound like a real YouTube chatter.
-Sometimes react with emojis or slang depending on what was said.
-Avoid repeating what the streamer said.
-Here's what the streamer just said: "${transcribedText}"
-Write your chat message:
+You are a viewer under the username TheNoodlesFanClubPresident chatting in a live YouTube stream.
+
+The streamer called Noodles is playing ${STREAMER_ACTIVITY || "a game"}.
+You respond casually, like a real viewer.
+
+Here is what the streamer JUST said:
+"${transcribedText}"
+
+Here is the recent conversation context (your short-term memory):
+${recentMemory}
+
+Long-term memory (earlier in the stream):
+${longTermMemory}
+
+Using both the new message and the memory, write a natural chat message.
+Keep it short (1–3 sentences) and casual:
 `;
 
   return new Promise((resolve, reject) => {
@@ -83,66 +111,54 @@ Write your chat message:
     let output = "";
     let errorOutput = "";
 
-    ollama.stdout.on("data", (data) => {
-      const text = data.toString();
-      process.stdout.write(text);
-      output += text;
-    });
-
-    ollama.stderr.on("data", (data) => errorOutput += data.toString());
+    ollama.stdout.on("data", (data) => (output += data.toString()));
+    ollama.stderr.on("data", (data) => (errorOutput += data.toString()));
 
     ollama.stdin.write(contextPrompt + "\n");
     ollama.stdin.end();
 
     ollama.on("close", (code) => {
-      if (code !== 0) {
-        console.error("❌ Ollama failed:", errorOutput);
-        reject(errorOutput);
-      } else {
-        resolve(output.trim());
-      }
+      if (code !== 0) reject(errorOutput);
+      else resolve(output.trim());
     });
   });
 }
 
-// -------------------- Main Loop --------------------
+
+
+// -------------------- Main --------------------
 
 (async () => {
   try {
     const auth = await getAuthorizedClient();
+    const liveChatId = await getLiveChatId(auth, STREAMER_CHANNEL_ID, STREAM_VIDEO_ID);
+    console.log(`🟢 Connected to live chat: ${liveChatId}`);
 
-    while (true) {
-      const liveChatData = await getLiveChatId(auth, STREAMER_CHANNEL_ID, STREAM_VIDEO_ID);
+    // Throttle control
+    let lastResponseTime = 0;
 
-      if (!liveChatData) {
-        console.log("⚠️ No live stream currently active. Retrying in 2 minutes...");
-        await new Promise(r => setTimeout(r, LOOP_INTERVAL));
-        continue;
+    // Start continuous recording + transcription
+    startContinuousRecording(async (transcript) => {
+      const now = Date.now();
+
+      // Only reply every 2 minutes, but still listen continuously
+      if (now - lastResponseTime < RESPONSE_INTERVAL) {
+        console.log("⏳ Skipping reply (cooldown active)...");
+        return;
       }
 
-      const { liveChatId, videoTitle } = liveChatData;
-      console.log(`🟢 Connected to live chat: ${liveChatId} (${videoTitle})`);
-
+      lastResponseTime = now;
+      console.log("📜 Received transcript:", transcript);
+      updateMemory(transcript);
+      saveLongTermMemory(transcript);
       try {
-        await recordClip();
-        const transcript = await transcribe();
-
-        if (!transcript || transcript.length === 0) {
-          console.log("❌ No transcript to generate AI response.");
-        } else {
-          const aiResponse = await generateAIResponse(transcript);
-          const cleanedResponse = aiResponse.replace(/^"|"$/g, "");
-          console.log(`🤖 AI Response: ${cleanedResponse}`);
-          await sendMessage(auth, liveChatId, cleanedResponse);
-        }
+        const aiResponse = await generateAIResponse(transcript);
+        const cleaned = aiResponse.replace(/^"|"$/g, "");
+        await sendMessage(auth, liveChatId, cleaned);
       } catch (err) {
-        console.error("❌ Error processing clip:", err);
+        console.error("❌ Error generating or sending message:", err);
       }
-
-      console.log(`⏱ Waiting ${LOOP_INTERVAL / 1000} seconds before next iteration...`);
-      await new Promise(r => setTimeout(r, LOOP_INTERVAL));
-    }
-
+    });
   } catch (err) {
     console.error("❌ Fatal error in chatbot:", err);
   }

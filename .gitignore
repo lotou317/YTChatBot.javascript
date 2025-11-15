@@ -6,5 +6,7 @@ AudioTranscriber/env
 YoutubeAuth/token.json
 whisper.cpp/
 whisper
+clip_1.wav
+clips/
 
 ggml-medium.en.bin
