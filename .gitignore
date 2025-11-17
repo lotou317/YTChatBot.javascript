@@ -9,4 +9,10 @@ whisper
 clip_1.wav
 clips/
 
+memory/
+stream_memory
+stream_memory.txt
+
 ggml-medium.en.bin
+
+ChatBot/stream_memory.txt

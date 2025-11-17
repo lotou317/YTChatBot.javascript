@@ -4,6 +4,7 @@ import { getAuthorizedClient } from "../YoutubeAuth/auth.js";
 import { google } from "googleapis";
 import "dotenv/config";
 import fs from "fs";
+import path from "path";
 
 const STREAMER_ACTIVITY = process.env.STREAMER_ACTIVITY;
 const STREAMER_CHANNEL_ID = process.env.STREAMER_CHANNEL_ID;
@@ -11,8 +12,9 @@ const STREAM_VIDEO_ID = process.env.STREAM_VIDEO_ID;
 const RESPONSE_INTERVAL = 120000; // 2 minutes between chat replies
 let conversationMemory = []; // holds recent lines of text
 const MAX_MEMORY_LENGTH = 10; // only keep the last 10 clips (you can adjust)
-const longTermMemoryFile = "./ChatBot/stream_memory.txt";
-
+const longTermMemoryFile = "./memory/stream_memory.txt";
+const longTermSummaryFile = path.resolve("./memory/long_term_summary.txt");
+let isGenerating = false;
 
 // -------------------- YouTube Chat Helpers --------------------
 
@@ -81,11 +83,69 @@ function saveLongTermMemory(transcript) {
   fs.appendFileSync(longTermMemoryFile, transcript + "\n");
 }
 
+function loadLongTermMemory() {
+  if (!fs.existsSync(longTermMemoryFile)) return "";
+  return fs.readFileSync(longTermMemoryFile, "utf8");
+}
+
+// -------------------- Long Term Memory Summary Helper --------------------
+
+function loadLongTermSummary() {
+  if (!fs.existsSync(longTermSummaryFile)) return "";
+  return fs.readFileSync(longTermSummaryFile, "utf8");
+}
+
+function saveLongTermSummary(summary) {
+  fs.writeFileSync(longTermSummaryFile, summary);
+}
+
+async function updateLongTermSummary(newTranscript) {
+  const oldSummary = loadLongTermSummary();
+
+  const prompt = `
+You maintain a concise summary of a livestream.
+
+Current summary:
+"${oldSummary}"
+
+New event:
+"${newTranscript}"
+
+Update the summary. Keep it short, around 5–10 sentences.
+Do NOT rewrite the whole summary. Only refine it with the new information.
+Return ONLY the updated summary.
+`;
+
+  return new Promise((resolve, reject) => {
+    const ollama = spawn("ollama", ["run", "llama3.1:8b"]);
+
+    let output = "";
+    let errorOutput = "";
+
+    ollama.stdout.on("data", (d) => (output += d.toString()));
+    ollama.stderr.on("data", (d) => (errorOutput += d.toString()));
+
+    ollama.stdin.write(prompt);
+    ollama.stdin.end();
+
+    ollama.on("close", (code) => {
+      if (code !== 0) {
+        reject(errorOutput);
+      } else {
+        const summary = output.trim();
+        saveLongTermSummary(summary);
+        resolve(summary);
+      }
+    });
+  });
+}
+
 
 // -------------------- AI Response Helper --------------------
 
 async function generateAIResponse(transcribedText) {
     const recentMemory = conversationMemory.join("\n");
+    const longTermSummary = loadLongTermSummary();
 
   const contextPrompt = `
 You are a viewer under the username TheNoodlesFanClubPresident chatting in a live YouTube stream.
@@ -100,7 +160,7 @@ Here is the recent conversation context (your short-term memory):
 ${recentMemory}
 
 Long-term memory (earlier in the stream):
-${longTermMemory}
+${longTermSummary}
 
 Using both the new message and the memory, write a natural chat message.
 Keep it short (1–3 sentences) and casual:
@@ -124,8 +184,6 @@ Keep it short (1–3 sentences) and casual:
   });
 }
 
-
-
 // -------------------- Main --------------------
 
 (async () => {
@@ -140,25 +198,39 @@ Keep it short (1–3 sentences) and casual:
     // Start continuous recording + transcription
     startContinuousRecording(async (transcript) => {
       const now = Date.now();
+      if (!transcript || transcript.trim().length < 3) return;
 
-      // Only reply every 2 minutes, but still listen continuously
+      // ALWAYS UPDATE MEMORY
+      updateMemory(transcript);
+      saveLongTermMemory(transcript);
+      await updateLongTermSummary(transcript);
+
+      // THROTTLE ONLY CHAT RESPONSES
       if (now - lastResponseTime < RESPONSE_INTERVAL) {
-        console.log("⏳ Skipping reply (cooldown active)...");
+        console.log("⏳ Skipping chat reply (cooldown), memory updated.");
         return;
       }
 
+      // Ensure only 1 AI response happens at a time
+      if (isGenerating) {
+        console.log("⚠️ AI already generating, skipping...");
+        return;
+      }
+
+      isGenerating = true;
       lastResponseTime = now;
-      console.log("📜 Received transcript:", transcript);
-      updateMemory(transcript);
-      saveLongTermMemory(transcript);
+
       try {
         const aiResponse = await generateAIResponse(transcript);
         const cleaned = aiResponse.replace(/^"|"$/g, "");
         await sendMessage(auth, liveChatId, cleaned);
       } catch (err) {
         console.error("❌ Error generating or sending message:", err);
+      } finally {
+        isGenerating = false;
       }
     });
+
   } catch (err) {
     console.error("❌ Fatal error in chatbot:", err);
   }
