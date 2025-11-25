@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { spawn } from "child_process";
 
 export default class MemoryManager {
     constructor(dbPath = "stream_memory.db") {
@@ -82,13 +83,51 @@ export default class MemoryManager {
         return row?.long_summary || "";
     }
 
-    updateSummary(streamId, newTranscript) {
-        let summary = this.getLongTermSummary(streamId);
-        summary += `\n- ${newTranscript}`;
+    async updateSummary(streamId, newTranscript) {
+        const oldSummary = this.getLongTermSummary(streamId);
+
+        const updatedSummary = await this.generateLongTermSummary(
+            oldSummary,
+            newTranscript
+        );
 
         this.db.prepare(`
             UPDATE streams SET long_summary = ? WHERE stream_id = ?
-        `).run(summary, streamId);
+        `).run(updatedSummary, streamId);
+    }
+
+    async generateLongTermSummary(oldSummary, newTranscript) {
+        const prompt = `
+You maintain a concise summary of a livestream.
+
+Current summary:
+"${oldSummary}"
+
+New event:
+"${newTranscript}"
+
+Update the summary. Keep it short, around 5–10 sentences.
+Do NOT rewrite the whole summary. Only refine it with the new information.
+Return ONLY the updated summary.
+`;
+
+        return new Promise((resolve, reject) => {
+            const ollama = spawn("ollama", ["run", "llama3.1:8b"]);
+
+            let output = "";
+            let errorOutput = "";
+
+            ollama.stdout.on("data", (d) => (output += d.toString()));
+            ollama.stderr.on("data", (d) => (errorOutput += d.toString()));
+
+            ollama.stdin.write(prompt);
+            ollama.stdin.end();
+
+            ollama.on("close", (code) => {
+                if (code !== 0) reject(errorOutput);
+                else resolve(output.trim());
+            });
+        });
     }
 
     getFullStreamLog(streamId) {
